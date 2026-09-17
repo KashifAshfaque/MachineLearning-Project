@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Movie Recommender</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+
+    <aside class="sidebar">
+        <div class="brand">
+            <span class="brand-icon">🎬</span>
+            <span class="brand-name">Movie Recommender</span>
+        </div>
+
+        <nav class="nav">
+            <button class="nav-item active" data-view="home">🏠 Home</button>
+        </nav>
+
+        <div class="sidebar-section">
+            <label class="field-label" for="categorySelect">Category</label>
+            <select id="categorySelect" class="select">
+                <option value="trending">Trending</option>
+                <option value="popular">Popular</option>
+                <option value="top_rated">Top Rated</option>
+            </select>
+        </div>
+
+        <div class="sidebar-section">
+            <label class="field-label" for="gridRange">
+                Grid columns <span id="gridValue" class="range-value">5</span>
+            </label>
+            <input type="range" id="gridRange" class="range" min="3" max="8" value="5">
+        </div>
+    </aside>
+
+    <main class="main">
+
+        <section class="search-section">
+            <div class="search-wrap">
+                <input
+                    type="text"
+                    id="movieInput"
+                    class="search-input"
+                    placeholder="Type a movie name — avatar, batman, love..."
+                    autocomplete="off"
+                    role="combobox"
+                    aria-expanded="false"
+                    aria-controls="suggestions">
+
+                <button id="recommendBtn" class="btn-primary" type="button">Recommend</button>
+
+                <ul id="suggestions" class="suggestions hidden" role="listbox"></ul>
+            </div>
+        </section>
+
+        <div id="loading" class="loading hidden">
+            <span class="spinner"></span> Loading...
+        </div>
+        <div id="error" class="error hidden" role="alert"></div>
+
+        <section id="homeView" class="view">
+            <h2 class="section-title">🏠 Home — <span id="feedLabel">Trending</span></h2>
+            <div id="homeGrid" class="grid"></div>
+        </section>
+
+        <section id="detailView" class="view hidden">
+            <button id="backBtn" class="btn-ghost" type="button">← Back</button>
+
+            <div class="detail">
+                <img id="detailPoster" class="detail-poster" src="" alt="">
+                <div class="detail-info">
+                    <h2 id="detailTitle" class="detail-title"></h2>
+                    <div id="detailMeta" class="detail-meta"></div>
+                    <div id="detailGenres" class="chips"></div>
+                    <p id="detailOverview" class="detail-overview"></p>
+                </div>
+            </div>
+
+            <h3 class="section-title">You might also like</h3>
+            <div id="recGrid" class="grid"></div>
+        </section>
+
+    </main>
+
+    <template id="cardTemplate">
+        <article class="card" tabindex="0">
+            <div class="card-poster">
+                <img class="card-img" src="" alt="" loading="lazy">
+                <div class="card-overlay">
+                    <button class="btn-open" type="button">Open</button>
+                </div>
+                <span class="card-rating"></span>
+            </div>
+            <div class="card-title"></div>
+            <div class="card-sub"></div>
+        </article>
+    </template>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+
+</html>
