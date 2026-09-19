@@ -2,7 +2,8 @@ import os
 import time
 import pickle
 import requests
-from concurrent.futures import ThreadPoolExecutor
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, render_template, request, jsonify
 
 try:
@@ -17,7 +18,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "model")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
-TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "")
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "").strip()
+
+TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
+TMDB_API_BASE = "https://api.themoviedb.org/3"
+
+FALLBACK_POSTER = "/static/no-poster.svg"
 
 movie_list = None
 similarity = None
@@ -25,7 +31,109 @@ movie_meta = None
 
 poster_cache = {}
 
-FALLBACK_POSTER = "/static/no-poster.svg"
+session = requests.Session()
+session.headers.update({
+    "Accept": "application/json",
+    "User-Agent": "Movie-Recommendation-System/1.0"
+})
+
+
+def clean_value(value, default=""):
+    if value is None:
+        return default
+
+    try:
+        if str(value).lower() == "nan":
+            return default
+    except Exception:
+        pass
+
+    return str(value).strip()
+
+
+def get_value(item, key, default=""):
+    if item is None:
+        return default
+
+    if isinstance(item, dict):
+        return item.get(key, default)
+
+    try:
+        if hasattr(item, "get"):
+            value = item.get(key, default)
+            if value is not None:
+                return value
+    except Exception:
+        pass
+
+    try:
+        return getattr(item, key, default)
+    except Exception:
+        return default
+
+
+def movie_to_dict(movie, index=None):
+    title = clean_value(
+        get_value(movie, "title")
+        or get_value(movie, "original_title")
+        or get_value(movie, "name")
+        or ""
+    )
+
+    movie_id = (
+        get_value(movie, "id")
+        or get_value(movie, "movie_id")
+        or get_value(movie, "tmdb_id")
+        or 0
+    )
+
+    try:
+        movie_id = int(movie_id)
+    except Exception:
+        movie_id = 0
+
+    overview = clean_value(
+        get_value(movie, "overview")
+        or get_value(movie, "description")
+        or ""
+    )
+
+    release_date = clean_value(
+        get_value(movie, "release_date")
+        or get_value(movie, "release")
+        or ""
+    )
+
+    genres = get_value(movie, "genres", "")
+
+    if isinstance(genres, list):
+        genres = ", ".join(
+            clean_value(
+                g.get("name", "")
+                if isinstance(g, dict)
+                else g
+            )
+            for g in genres
+        )
+
+    genres = clean_value(genres)
+
+    poster = clean_value(
+        get_value(movie, "poster")
+        or get_value(movie, "poster_url")
+        or get_value(movie, "poster_path")
+        or ""
+    )
+
+    return {
+        "index": index,
+        "id": movie_id,
+        "title": title,
+        "overview": overview,
+        "release_date": release_date,
+        "genres": genres,
+        "poster": poster
+    }
 
 
 def load_pickle(filename):
@@ -45,133 +153,34 @@ def load_model():
     global similarity
     global movie_meta
 
+    print("\n" + "=" * 65)
+    print("Loading Movie Recommendation Model")
+    print("=" * 65)
+
     movie_list = load_pickle("movie_list.pkl")
     similarity = load_pickle("similarity.pkl")
     movie_meta = load_pickle("movie_meta.pkl")
 
-    print("=" * 60)
+    print(f"Movies in movie_list : {len(movie_list)}")
+
+    try:
+        print(f"Movies in movie_meta : {len(movie_meta)}")
+    except Exception:
+        print("Movies in movie_meta : Unknown")
+
+    print(f"TMDB API key loaded  : {bool(TMDB_API_KEY)}")
+
+    print("=" * 65)
     print("Movie model loaded successfully")
-    print(f"Movies in movie_list: {len(movie_list)}")
-    print(f"Movies in movie_meta: {len(movie_meta)}")
-    print(f"TMDB API key loaded: {bool(TMDB_API_KEY)}")
-    print("=" * 60)
-
-
-load_model()
-
-
-def get_value(row, column, default=None):
-    try:
-        if column in row:
-            value = row[column]
-
-            if value is None:
-                return default
-
-            try:
-                if value != value:
-                    return default
-            except Exception:
-                pass
-
-            return value
-    except Exception:
-        pass
-
-    return default
-
-
-def clean_value(value):
-    if value is None:
-        return None
-
-    try:
-        if value != value:
-            return None
-    except Exception:
-        pass
-
-    try:
-        if hasattr(value, "item"):
-            return value.item()
-    except Exception:
-        pass
-
-    return value
-
-
-def movie_to_dict(row, poster=None, score=None):
-    movie_id = clean_value(
-        get_value(
-            row,
-            "movie_id",
-            get_value(row, "id", None)
-        )
-    )
-
-    title = clean_value(
-        get_value(
-            row,
-            "title",
-            get_value(row, "movie_title", "")
-        )
-    )
-
-    overview = clean_value(
-        get_value(row, "overview", "")
-    )
-
-    rating = clean_value(
-        get_value(
-            row,
-            "vote_average",
-            get_value(
-                row,
-                "rating",
-                get_value(row, "vote", None)
-            )
-        )
-    )
-
-    release_date = clean_value(
-        get_value(
-            row,
-            "release_date",
-            get_value(row, "release_year", "")
-        )
-    )
-
-    popularity = clean_value(
-        get_value(row, "popularity", None)
-    )
-
-    genres = clean_value(
-        get_value(row, "genres", "")
-    )
-
-    result = {
-        "movie_id": movie_id,
-        "id": movie_id,
-        "title": title,
-        "movie_title": title,
-        "poster": poster or FALLBACK_POSTER,
-        "poster_url": poster or FALLBACK_POSTER,
-        "overview": overview or "",
-        "rating": rating,
-        "vote_average": rating,
-        "release_date": release_date or "",
-        "popularity": popularity,
-        "genres": genres
-    }
-
-    if score is not None:
-        result["score"] = round(float(score), 4)
-        result["similarity"] = round(float(score), 4)
-
-    return result
+    print("=" * 65 + "\n")
 
 
 def fetch_poster(movie_id, title=""):
+    try:
+        movie_id = int(movie_id)
+    except Exception:
+        movie_id = 0
+
     if movie_id in poster_cache:
         return poster_cache[movie_id]
 
@@ -184,291 +193,385 @@ def fetch_poster(movie_id, title=""):
         "User-Agent": "Movie-Recommendation-System/1.0"
     }
 
-    movie_url = (
-        f"https://api.themoviedb.org/3/movie/{movie_id}"
-    )
+    if movie_id:
+        movie_url = f"{TMDB_API_BASE}/movie/{movie_id}"
 
-    for attempt in range(3):
-        try:
-            response = requests.get(
-                movie_url,
-                params={
-                    "api_key": TMDB_API_KEY,
-                    "language": "en-US"
-                },
-                headers=headers,
-                timeout=15
-            )
+        for attempt in range(3):
+            try:
+                response = session.get(
+                    movie_url,
+                    params={
+                        "api_key": TMDB_API_KEY,
+                        "language": "en-US"
+                    },
+                    headers=headers,
+                    timeout=15
+                )
 
-            if response.status_code == 429:
-                time.sleep(2)
-                continue
+                if response.status_code == 429:
+                    time.sleep(2)
+                    continue
 
-            if response.status_code == 200:
-                data = response.json()
-                poster_path = data.get("poster_path")
-
-                if poster_path:
-                    poster = (
-                        "https://image.tmdb.org/t/p/w500"
-                        + poster_path
-                    )
-
-                    poster_cache[movie_id] = poster
-                    return poster
-
-                break
-
-        except Exception as error:
-            print(
-                f"[poster fetch failed] "
-                f"movie_id={movie_id} "
-                f"attempt={attempt} "
-                f"error={error}"
-            )
-
-            time.sleep(0.8)
-
-    if title:
-        search_url = (
-            "https://api.themoviedb.org/3/search/movie"
-        )
-
-        try:
-            response = requests.get(
-                search_url,
-                params={
-                    "api_key": TMDB_API_KEY,
-                    "query": title,
-                    "language": "en-US",
-                    "include_adult": False
-                },
-                headers=headers,
-                timeout=15
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                results = data.get("results", [])
-
-                if results:
-                    poster_path = results[0].get(
-                        "poster_path"
-                    )
+                if response.status_code == 200:
+                    data = response.json()
+                    poster_path = data.get("poster_path")
 
                     if poster_path:
-                        poster = (
-                            "https://image.tmdb.org/t/p/w500"
-                            + poster_path
-                        )
-
+                        poster = TMDB_IMAGE_BASE + poster_path
                         poster_cache[movie_id] = poster
                         return poster
 
-        except Exception as error:
-            print(
-                f"[TMDB search failed] "
-                f"{title} | {error}"
-            )
+                    break
+
+                if response.status_code == 404:
+                    break
+
+            except requests.exceptions.RequestException as error:
+                print(
+                    f"[TMDB] Request failed | "
+                    f"movie_id={movie_id} | "
+                    f"attempt={attempt + 1} | {error}"
+                )
+                time.sleep(0.8)
+
+            except Exception as error:
+                print(
+                    f"[TMDB] Unexpected error | "
+                    f"movie_id={movie_id} | {error}"
+                )
+                break
+
+    title = clean_value(title)
+
+    if title:
+        search_url = f"{TMDB_API_BASE}/search/movie"
+
+        for attempt in range(2):
+            try:
+                response = session.get(
+                    search_url,
+                    params={
+                        "api_key": TMDB_API_KEY,
+                        "query": title,
+                        "language": "en-US",
+                        "include_adult": False
+                    },
+                    headers=headers,
+                    timeout=15
+                )
+
+                if response.status_code == 429:
+                    time.sleep(2)
+                    continue
+
+                if response.status_code == 200:
+                    data = response.json()
+                    results = data.get("results", [])
+
+                    if results:
+                        selected_result = results[0]
+                        title_lower = title.lower()
+
+                        for result in results:
+                            result_title = clean_value(
+                                result.get("title", "")
+                            )
+
+                            if result_title.lower() == title_lower:
+                                selected_result = result
+                                break
+
+                        poster_path = selected_result.get(
+                            "poster_path"
+                        )
+
+                        if poster_path:
+                            poster = (
+                                TMDB_IMAGE_BASE
+                                + poster_path
+                            )
+
+                            poster_cache[movie_id] = poster
+                            return poster
+
+                    break
+
+            except requests.exceptions.RequestException as error:
+                print(
+                    f"[TMDB Search] {title} | "
+                    f"attempt={attempt + 1} | {error}"
+                )
+                time.sleep(0.8)
+
+            except Exception as error:
+                print(
+                    f"[TMDB Search] {title} | {error}"
+                )
+                break
 
     poster_cache[movie_id] = FALLBACK_POSTER
     return FALLBACK_POSTER
 
 
-def fetch_posters(rows):
-    def get_poster(row):
-        movie_id = get_value(
-            row,
-            "movie_id",
-            get_value(row, "id", None)
-        )
+def fetch_posters(movies, max_workers=8):
+    if not movies:
+        return []
 
-        title = get_value(
-            row,
-            "title",
-            get_value(row, "movie_title", "")
-        )
-
-        try:
-            movie_id = int(movie_id)
-        except Exception:
-            return FALLBACK_POSTER
-
-        return fetch_poster(
-            movie_id,
-            str(title)
-        )
+    results = [FALLBACK_POSTER] * len(movies)
 
     with ThreadPoolExecutor(
-        max_workers=5
+        max_workers=max_workers
     ) as executor:
-        return list(
-            executor.map(get_poster, rows)
-        )
 
+        future_map = {}
 
-def find_title(typed):
-    if movie_list is None:
-        return None
-
-    typed = str(typed).strip()
-
-    if not typed:
-        return None
-
-    titles = movie_list["title"].astype(str)
-
-    exact = movie_list[
-        titles == typed
-    ]
-
-    if not exact.empty:
-        return exact.iloc[0]["title"]
-
-    lower_typed = typed.lower()
-
-    case_insensitive = movie_list[
-        titles.str.lower() == lower_typed
-    ]
-
-    if not case_insensitive.empty:
-        return case_insensitive.iloc[0]["title"]
-
-    partial = movie_list[
-        titles.str.lower().str.contains(
-            lower_typed,
-            na=False,
-            regex=False
-        )
-    ]
-
-    if not partial.empty:
-        return partial.iloc[0]["title"]
-
-    return None
-
-
-def recommend(title, limit=5):
-    if movie_list is None or similarity is None:
-        return []
-
-    matches = movie_list[
-        movie_list["title"] == title
-    ]
-
-    if matches.empty:
-        return []
-
-    position = matches.index[0]
-
-    if hasattr(movie_list, "index"):
-        try:
-            position = movie_list.index.get_loc(
-                matches.index[0]
+        for index, movie in enumerate(movies):
+            movie_dict = movie_to_dict(
+                movie,
+                index=index
             )
-        except Exception:
-            position = matches.index[0]
 
-    distances = similarity[position]
-
-    movie_indices = sorted(
-        enumerate(distances),
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    movie_indices = movie_indices[
-        1:limit + 1
-    ]
-
-    rows = [
-        movie_list.iloc[index]
-        for index, score in movie_indices
-    ]
-
-    posters = fetch_posters(rows)
-
-    results = []
-
-    for position, (
-        (index, score),
-        row
-    ) in enumerate(
-        zip(movie_indices, rows)
-    ):
-        results.append(
-            movie_to_dict(
-                row,
-                posters[position],
-                score
+            future = executor.submit(
+                fetch_poster,
+                movie_dict["id"],
+                movie_dict["title"]
             )
-        )
+
+            future_map[future] = index
+
+        for future in as_completed(future_map):
+            index = future_map[future]
+
+            try:
+                results[index] = future.result()
+            except Exception as error:
+                print(
+                    f"[Poster Worker Error] "
+                    f"index={index} | {error}"
+                )
+                results[index] = FALLBACK_POSTER
 
     return results
 
 
-def prepare_home_movies(category, limit):
-    if movie_meta is None:
+def find_title(query):
+    if movie_list is None:
         return []
 
-    df = movie_meta.copy()
+    query = clean_value(query).lower()
 
-    if df.empty:
+    if not query:
         return []
 
-    category = str(category).lower()
+    matches = []
 
-    if category == "popular":
-        if "popularity" in df.columns:
-            df = df.sort_values(
-                "popularity",
-                ascending=False
+    try:
+        if hasattr(movie_list, "iterrows"):
+            for index, row in movie_list.iterrows():
+                title = clean_value(
+                    get_value(row, "title")
+                )
+
+                if query in title.lower():
+                    matches.append(index)
+
+                    if len(matches) >= 10:
+                        break
+
+            return matches
+
+    except Exception as error:
+        print(f"[find_title DataFrame] {error}")
+
+    try:
+        for index, movie in enumerate(movie_list):
+            title = clean_value(
+                get_value(movie, "title")
             )
 
-    elif category in ["top-rated", "top_rated"]:
-        if "vote_average" in df.columns:
-            df = df.sort_values(
-                "vote_average",
-                ascending=False
+            if query in title.lower():
+                matches.append(index)
+
+                if len(matches) >= 10:
+                    break
+
+    except Exception as error:
+        print(f"[find_title list] {error}")
+
+    return matches
+
+
+def get_movie(index):
+    try:
+        if hasattr(movie_list, "iloc"):
+            return movie_list.iloc[index]
+
+        return movie_list[index]
+
+    except Exception:
+        return None
+
+
+def recommend(title, count=10):
+    if movie_list is None or similarity is None:
+        return []
+
+    title = clean_value(title)
+
+    if not title:
+        return []
+
+    index = None
+
+    try:
+        if hasattr(movie_list, "reset_index"):
+            data = movie_list.reset_index(drop=True)
+
+            for i, row in data.iterrows():
+                movie_title = clean_value(
+                    get_value(row, "title")
+                )
+
+                if movie_title.lower() == title.lower():
+                    index = i
+                    break
+
+            if index is None:
+                for i, row in data.iterrows():
+                    movie_title = clean_value(
+                        get_value(row, "title")
+                    )
+
+                    if title.lower() in movie_title.lower():
+                        index = i
+                        break
+
+    except Exception as error:
+        print(f"[Recommendation search] {error}")
+
+    if index is None:
+        try:
+            for i, movie in enumerate(movie_list):
+                movie_title = clean_value(
+                    get_value(movie, "title")
+                )
+
+                if movie_title.lower() == title.lower():
+                    index = i
+                    break
+
+                if title.lower() in movie_title.lower():
+                    index = i
+
+        except Exception as error:
+            print(
+                f"[Recommendation list search] {error}"
             )
-        elif "rating" in df.columns:
-            df = df.sort_values(
-                "rating",
-                ascending=False
+
+    if index is None:
+        return []
+
+    try:
+        distances = similarity[index]
+    except Exception as error:
+        print(
+            f"[Similarity error] "
+            f"index={index} | {error}"
+        )
+        return []
+
+    try:
+        movie_indexes = sorted(
+            enumerate(distances),
+            key=lambda x: x[1],
+            reverse=True
+        )
+    except Exception as error:
+        print(
+            f"[Similarity sorting error] {error}"
+        )
+        return []
+
+    recommendations = []
+
+    for movie_index, score in movie_indexes[1:]:
+
+        if len(recommendations) >= count:
+            break
+
+        try:
+            movie = get_movie(movie_index)
+
+            if movie is None:
+                continue
+
+            movie_dict = movie_to_dict(
+                movie,
+                index=movie_index
             )
 
-    elif category == "trending":
-        if "popularity" in df.columns:
-            df = df.sort_values(
-                "popularity",
-                ascending=False
+            movie_dict["similarity"] = round(
+                float(score),
+                4
             )
 
-    elif category == "recent":
-        if "release_date" in df.columns:
-            df = df.sort_values(
-                "release_date",
-                ascending=False
+            recommendations.append(movie_dict)
+
+        except Exception as error:
+            print(
+                f"[Recommendation item error] "
+                f"{movie_index} | {error}"
             )
 
-    df = df.head(limit)
+    poster_list = fetch_posters(
+        recommendations,
+        max_workers=8
+    )
 
-    rows = [
-        row
-        for _, row in df.iterrows()
-    ]
+    for i, poster in enumerate(poster_list):
+        if i < len(recommendations):
+            recommendations[i]["poster"] = poster
 
-    posters = fetch_posters(rows)
+    return recommendations
+
+
+def prepare_home_movies(limit=12):
+    if movie_list is None:
+        return []
 
     movies = []
 
-    for row, poster in zip(rows, posters):
-        movies.append(
-            movie_to_dict(
-                row,
-                poster
-            )
+    try:
+        total = min(
+            len(movie_list),
+            limit
         )
+
+        for i in range(total):
+            movie = get_movie(i)
+
+            if movie is None:
+                continue
+
+            movie_dict = movie_to_dict(
+                movie,
+                index=i
+            )
+
+            movies.append(movie_dict)
+
+    except Exception as error:
+        print(f"[Home movies error] {error}")
+        return []
+
+    posters = fetch_posters(
+        movies,
+        max_workers=8
+    )
+
+    for i, poster in enumerate(posters):
+        if i < len(movies):
+            movies[i]["poster"] = poster
 
     return movies
 
@@ -479,116 +582,143 @@ def home():
 
 
 @app.route("/suggest")
-def suggest_route():
+def suggest():
     query = request.args.get(
         "q",
-        request.args.get("query", "")
+        ""
     ).strip()
 
     if not query:
-        return jsonify({
-            "suggestions": []
-        })
+        return jsonify([])
 
-    titles = movie_list["title"].astype(str)
+    matches = find_title(query)
 
-    mask = titles.str.lower().str.contains(
-        query.lower(),
-        na=False,
-        regex=False
-    )
+    suggestions = []
 
-    suggestions = (
-        movie_list.loc[mask, "title"]
-        .astype(str)
-        .drop_duplicates()
-        .head(10)
-        .tolist()
-    )
+    for index in matches:
+        try:
+            movie = get_movie(index)
 
-    return jsonify({
-        "suggestions": suggestions,
-        "results": suggestions
-    })
+            movie_dict = movie_to_dict(
+                movie,
+                index=index
+            )
+
+            suggestions.append({
+                "id": movie_dict["id"],
+                "title": movie_dict["title"],
+                "index": index
+            })
+
+        except Exception:
+            continue
+
+    return jsonify(suggestions)
 
 
 @app.route("/home-feed")
-def home_feed_route():
-    category = request.args.get(
-        "category",
-        "trending"
-    )
-
+def home_feed():
     try:
-        limit = int(
-            request.args.get(
-                "limit",
-                18
-            )
+        movies = prepare_home_movies(
+            limit=12
         )
-    except Exception:
-        limit = 18
 
-    limit = max(
-        1,
-        min(limit, 50)
-    )
+        return jsonify({
+            "success": True,
+            "movies": movies
+        })
 
-    movies = prepare_home_movies(
-        category,
-        limit
-    )
+    except Exception as error:
+        print(f"[Home Feed Error] {error}")
 
-    return jsonify({
-        "category": category,
-        "limit": limit,
-        "movies": movies,
-        "results": movies
-    })
+        return jsonify({
+            "success": False,
+            "movies": [],
+            "error": str(error)
+        }), 500
 
 
 @app.route("/movie/<int:movie_id>")
-def movie_detail_route(movie_id):
-    if movie_meta is None:
+def movie_details(movie_id):
+    if movie_list is None:
         return jsonify({
-            "error": "Movie metadata is not loaded"
+            "success": False,
+            "error": "Movie model is not loaded."
         }), 500
 
-    if "movie_id" in movie_meta.columns:
-        matches = movie_meta[
-            movie_meta["movie_id"] == movie_id
-        ]
-    elif "id" in movie_meta.columns:
-        matches = movie_meta[
-            movie_meta["id"] == movie_id
-        ]
-    else:
-        matches = movie_meta.iloc[0:0]
+    found_movie = None
 
-    if matches.empty:
+    try:
+        if hasattr(movie_list, "iterrows"):
+            for index, row in movie_list.iterrows():
+
+                current_id = (
+                    get_value(row, "id")
+                    or get_value(row, "movie_id")
+                    or get_value(row, "tmdb_id")
+                    or 0
+                )
+
+                try:
+                    current_id = int(current_id)
+                except Exception:
+                    continue
+
+                if current_id == movie_id:
+                    found_movie = movie_to_dict(
+                        row,
+                        index=index
+                    )
+                    break
+
+    except Exception as error:
+        print(
+            f"[Movie Details DataFrame] {error}"
+        )
+
+    if found_movie is None:
+        try:
+            for index, movie in enumerate(movie_list):
+
+                current_id = (
+                    get_value(movie, "id")
+                    or get_value(movie, "movie_id")
+                    or get_value(movie, "tmdb_id")
+                    or 0
+                )
+
+                try:
+                    current_id = int(current_id)
+                except Exception:
+                    continue
+
+                if current_id == movie_id:
+                    found_movie = movie_to_dict(
+                        movie,
+                        index=index
+                    )
+                    break
+
+        except Exception as error:
+            print(
+                f"[Movie Details List] {error}"
+            )
+
+    if found_movie is None:
         return jsonify({
-            "error": "Movie not found"
+            "success": False,
+            "error": "Movie not found."
         }), 404
 
-    row = matches.iloc[0]
-
-    title = get_value(
-        row,
-        "title",
-        get_value(row, "movie_title", "")
+    found_movie["poster"] = fetch_poster(
+        found_movie["id"],
+        found_movie["title"]
     )
 
-    poster = fetch_poster(
-        movie_id,
-        str(title)
-    )
-
-    return jsonify(
-        movie_to_dict(
-            row,
-            poster
-        )
-    )
+    return jsonify({
+        "success": True,
+        "movie": found_movie
+    })
 
 
 @app.route(
@@ -596,28 +726,32 @@ def movie_detail_route(movie_id):
     methods=["GET", "POST"]
 )
 def recommend_route():
-    title = ""
 
     if request.method == "POST":
-        if request.is_json:
-            data = request.get_json(
-                silent=True
-            ) or {}
 
-            title = (
-                data.get("title")
-                or data.get("movie")
-                or data.get("query")
-                or ""
+        data = request.get_json(
+            silent=True
+        ) or {}
+
+        title = (
+            data.get("title")
+            or data.get("movie")
+            or data.get("query")
+            or ""
+        )
+
+        try:
+            count = int(
+                data.get(
+                    "count",
+                    10
+                )
             )
-        else:
-            title = (
-                request.form.get("title")
-                or request.form.get("movie")
-                or request.form.get("query")
-                or ""
-            )
+        except Exception:
+            count = 10
+
     else:
+
         title = (
             request.args.get("title")
             or request.args.get("movie")
@@ -625,54 +759,123 @@ def recommend_route():
             or ""
         )
 
-    title = str(title).strip()
+        try:
+            count = int(
+                request.args.get(
+                    "count",
+                    10
+                )
+            )
+        except Exception:
+            count = 10
+
+    count = max(
+        1,
+        min(count, 20)
+    )
+
+    title = title.strip()
 
     if not title:
         return jsonify({
-            "error": "Please enter a movie title",
-            "recommendations": [],
-            "movies": []
+            "success": False,
+            "error": "Please provide a movie title.",
+            "recommendations": []
         }), 400
 
-    matched_title = find_title(title)
+    try:
 
-    if not matched_title:
+        recommendations = recommend(
+            title,
+            count=count
+        )
+
         return jsonify({
-            "error": "Movie not found in the dataset",
-            "recommendations": [],
-            "movies": []
-        }), 404
+            "success": True,
+            "movie": title,
+            "recommendations": recommendations
+        })
 
-    recommendations = recommend(
-        matched_title,
-        5
-    )
+    except Exception as error:
 
-    return jsonify({
-        "title": matched_title,
-        "movie": matched_title,
-        "recommendations": recommendations,
-        "movies": recommendations,
-        "results": recommendations
-    })
+        print(
+            f"[Recommendation Route Error] "
+            f"{error}"
+        )
+
+        return jsonify({
+            "success": False,
+            "error": str(error),
+            "recommendations": []
+        }), 500
 
 
 @app.route("/health")
 def health():
+
+    model_loaded = (
+        movie_list is not None
+        and similarity is not None
+        and movie_meta is not None
+    )
+
     return jsonify({
         "status": "ok",
-        "movie_list_loaded": movie_list is not None,
-        "movie_meta_loaded": movie_meta is not None,
-        "similarity_loaded": similarity is not None,
-        "tmdb_key_loaded": bool(TMDB_API_KEY)
+        "model_loaded": model_loaded,
+        "movie_count": (
+            len(movie_list)
+            if movie_list is not None
+            else 0
+        ),
+        "tmdb_api_key_loaded": bool(
+            TMDB_API_KEY
+        )
     })
 
 
+@app.route("/model-status")
+def model_status():
+
+    return jsonify({
+        "movie_list_loaded": movie_list is not None,
+        "similarity_loaded": similarity is not None,
+        "movie_meta_loaded": movie_meta is not None,
+        "movie_count": (
+            len(movie_list)
+            if movie_list is not None
+            else 0
+        ),
+        "meta_count": (
+            len(movie_meta)
+            if movie_meta is not None
+            else 0
+        ),
+        "tmdb_api_key_loaded": bool(
+            TMDB_API_KEY
+        ),
+        "model_directory": MODEL_DIR
+    })
+
+
+load_model()
+
+
 if __name__ == "__main__":
-    print("=" * 60)
-    print("Starting Flask server...")
-    print("Open: http://127.0.0.1:5000")
-    print("=" * 60)
+
+    print("\nMovie Recommendation System started!")
+
+    print(
+        "Open: http://127.0.0.1:5000"
+    )
+
+    print(
+        "Health: http://127.0.0.1:5000/health"
+    )
+
+    print(
+        "Model Status: "
+        "http://127.0.0.1:5000/model-status"
+    )
 
     app.run(
         host="0.0.0.0",
